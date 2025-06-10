@@ -1,0 +1,5 @@
+.env
+venv
+preprocess.py
+*.pyc
+.DS_Store
