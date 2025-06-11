@@ -3,3 +3,15 @@ venv
 preprocess.py
 *.pyc
 .DS_Store
+downloaded_threads
+maarkdown_files
+
+# Ignore everything
+*
+
+# But don't ignore these files
+!app.py
+!knowledge_base.db
+!vercel.json
+!requirements.txt
+!.gitignore
