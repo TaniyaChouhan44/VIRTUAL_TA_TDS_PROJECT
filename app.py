@@ -60,13 +60,6 @@ if not API_KEY:
 
 
 
-app = FastAPI()
-
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the TDS Virtual TA API!"}
-
-
 # Create a connection to the SQLite database
 def get_db_connection():
     conn = None
