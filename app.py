@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import traceback
 from dotenv import load_dotenv
+from fastapi.responses import RedirectResponse
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -59,6 +61,11 @@ if not API_KEY:
     logger.error("API_KEY environment variable is not set. The application will not function correctly.")
 
 
+app = FastAPI()
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/docs")
 
 # Create a connection to the SQLite database
 def get_db_connection():
@@ -111,12 +118,6 @@ if not os.path.exists(DB_PATH):
     conn.close()
 
 
-app = FastAPI()
-
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the TDS Virtual TA API! Visit /docs for Swagger UI."}
-
 # Vector similarity calculation with improved handling
 def cosine_similarity(vec1, vec2):
     try:
@@ -143,54 +144,56 @@ def cosine_similarity(vec1, vec2):
         logger.error(traceback.format_exc())
         return 0.0  # Return 0 similarity on error rather than crashing
 
-# Function to get embedding from aipipe proxy with retry mechanism
-async def get_embedding(text, max_retries=3):
+# Function to get embedding from AIPipe proxy with retry mechanism
+async def get_embedding(text: str, max_retries: int = 3):
     if not API_KEY:
         error_msg = "API_KEY environment variable not set"
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
     
+    url = "https://aipipe.org/openai/v1/embeddings"
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "text-embedding-3-small",
+        "input": text
+    }
+
     retries = 0
     while retries < max_retries:
         try:
-            logger.info(f"Getting embedding for text (length: {len(text)})")
-            # Call the embedding API through aipipe proxy
-            url = "https://aipipe.org/openai/v1/embeddings"
-            headers = {
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "text-embedding-3-small",
-                "input": text
-            }
-            
-            logger.info("Sending request to embedding API")
+            logger.info(f"Attempt {retries + 1}: Requesting embedding for text length {len(text)}")
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status == 200:
                         result = await response.json()
                         logger.info("Successfully received embedding")
                         return result["data"][0]["embedding"]
-                    elif response.status == 429:  # Rate limit error
+                    
+                    elif response.status == 429:
                         error_text = await response.text()
-                        logger.warning(f"Rate limit reached, retrying after delay (retry {retries+1}): {error_text}")
-                        await asyncio.sleep(5 * (retries + 1))  # Exponential backoff
+                        logger.warning(f"Rate limit reached. Retrying after backoff... ({retries + 1})")
+                        await asyncio.sleep(5 * (retries + 1))  # exponential backoff
                         retries += 1
+                        continue
+
                     else:
                         error_text = await response.text()
-                        error_msg = f"Error getting embedding (status {response.status}): {error_text}"
-                        logger.error(error_msg)
-                        raise HTTPException(status_code=response.status, detail=error_msg)
+                        logger.error(f"Embedding API Error {response.status}: {error_text}")
+                        raise HTTPException(status_code=response.status, detail=error_text)
+
         except Exception as e:
-            error_msg = f"Exception getting embedding (attempt {retries+1}/{max_retries}): {e}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
+            logger.error(f"Exception during embedding request (attempt {retries + 1}/{max_retries}): {str(e)}")
+            logger.debug(traceback.format_exc())
             retries += 1
             if retries >= max_retries:
-                raise HTTPException(status_code=500, detail=error_msg)
-            await asyncio.sleep(3 * retries)  # Wait before retry
+                raise HTTPException(status_code=500, detail="Failed to get embedding after multiple attempts")
+            await asyncio.sleep(3 * retries)  # linear backoff
 
+    raise HTTPException(status_code=500, detail="Unexpected error in embedding logic")
 # Function to find similar content in the database with improved logic
 async def find_similar_content(query_embedding, conn):
     try:
@@ -258,7 +261,7 @@ async def find_similar_content(query_embedding, conn):
         
         for chunk in markdown_chunks:
             try:
-                embedding = json.loads(chunk["embedding"])
+                embedding = np.frombuffer(chunk["embedding"], dtype=np.float32).tolist()
                 similarity = cosine_similarity(query_embedding, embedding)
                 
                 if similarity >= SIMILARITY_THRESHOLD:
@@ -605,7 +608,7 @@ def parse_llm_response(response):
         }
 
 # Define API routes
-@app.post("/api/")
+@app.post("/api/", response_model=QueryResponse)
 async def query_knowledge_base(request: QueryRequest):
     try:
         # Log the incoming request
@@ -635,10 +638,11 @@ async def query_knowledge_base(request: QueryRequest):
             
             if not relevant_results:
                 logger.info("No relevant results found")
-                return {
-                    "answer": "I couldn't find any relevant information in my knowledge base.",
-                    "links": []
-                }
+                return QueryResponse(
+                    answer="I couldn't find any relevant information in my knowledge base.",
+                    links=[]
+                )
+
             
             # Enrich results with adjacent chunks for better context
             logger.info("Enriching results with adjacent chunks")
@@ -672,7 +676,11 @@ async def query_knowledge_base(request: QueryRequest):
             logger.info(f"Returning result: answer_length={len(result['answer'])}, num_links={len(result['links'])}")
             
             # Return the response in the exact format required
-            return result
+            return QueryResponse(
+                answer=result["answer"],
+                links=[LinkInfo(**link) for link in result["links"]]
+            )
+
         except Exception as e:
             error_msg = f"Error processing query: {e}"
             logger.error(error_msg)
@@ -693,9 +701,9 @@ async def query_knowledge_base(request: QueryRequest):
             content={"error": error_msg}
         )
 
-# Health check endpoint
-@app.get("/health")
-async def health_check():
+# ask check endpoint
+@app.get("/ask")
+async def ask_check():
     try:
         # Try to connect to the database as part of health check
         conn = sqlite3.connect(DB_PATH)
@@ -718,7 +726,7 @@ async def health_check():
         conn.close()
         
         return {
-            "status": "healthy", 
+            "status": "Working", 
             "database": "connected", 
             "api_key_set": bool(API_KEY),
             "discourse_chunks": discourse_count,
