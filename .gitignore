@@ -2,8 +2,10 @@
 *
 
 # But don't ignore these files
-!app.py
+!main.py
 !knowledge_base.db
 !vercel.json
+!scrape/scrape_discourse.py
+!scrape/scrape_tds.py
 !requirements.txt
 !.gitignore
